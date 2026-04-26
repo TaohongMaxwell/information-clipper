@@ -14,6 +14,11 @@
 import os
 
 CLIP_DIR = "/volume2/AI工作区/知识库/1.raw/派蒙剪报"
+BAK_DIR = os.path.join(CLIP_DIR, ".bak")
+
+# 自动创建 .bak/ 备份目录（保留30天内的备份）
+if not os.path.exists(BAK_DIR):
+    os.makedirs(BAK_DIR)
 
 files = sorted([f for f in os.listdir(CLIP_DIR) if f.endswith('.md') and f != 'README.md'])
 issues = []
