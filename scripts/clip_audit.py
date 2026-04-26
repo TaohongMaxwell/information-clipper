@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""派蒙剪报规范达标检查脚本
+"""剪报规范达标检查脚本
 
 运行方式：
     python3 scripts/clip_audit.py
