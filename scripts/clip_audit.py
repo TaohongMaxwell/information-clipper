@@ -52,8 +52,7 @@ for f in files:
 
     has_no_paragraph_break = False
     if content_lines > 50:
-        # 检查正文是否有任何换行（段落分隔）
-        body_start = content.find('\n---\n', 0)  # 跳过frontmatter
+        body_start = content.find('\n---\n', 0)
         if body_start != -1:
             body_text = content[body_start+5:]
             if '\n' not in body_text:

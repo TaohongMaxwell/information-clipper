@@ -603,7 +603,6 @@ python3 /opt/data/skills/productivity/information-clipper/scripts/clip_summary.p
 
 ```python
 """剪报规范达标检查脚本"""
-"""剪报规范达标检查脚本"""
 
 CLIP_DIR = "/path/to/your/clip/directory"  # 请替换为实际目录
 
