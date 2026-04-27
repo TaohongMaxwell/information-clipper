@@ -1,11 +1,16 @@
 ---
 name: information-clipper
-description: 信息剪报 Skill — 接收链接，自动抓取网页内容并整理为标准 Markdown，存入本地剪报库。支持微信公众号、即刻、Bilibili、知乎等多个平台，生成含元数据的结构化文档，适合作为知识管理或个人阅读存档的工作流。
+description: 信息剪报 Skill — 接收链接，自动抓取网页内容并整理为标准 Markdown，存入本地剪报库。支持微信公众号、即刻等平台，Bilibili/知乎/小红书待测试，生成含元数据的结构化文档，适合作为知识管理或个人阅读存档的工作流。
 author: TaohongMaxwell
 repository: https://github.com/TaohongMaxwell/information-clipper
 ---
 
 # 信息剪报 Skill
+
+## 入口
+
+用户发送链接并要求收藏时，自动触发本 Skill。
+用户要求更新/刷新已有剪报时，自动触发增量更新流程。
 
 ## CLIP_DIR
 
@@ -15,426 +20,158 @@ repository: https://github.com/TaohongMaxwell/information-clipper
 
 > ⚠️ 若克隆到其他机器使用，请将 `CLIP_DIR` 替换为本地实际路径。
 
-## 功能
+## 核心脚本
 
-接收一个或多个链接，自动抓取页面内容，提取元数据，生成标准 Markdown 存入剪报目录。
+**`scripts/clip.py`** 是本 Skill 的核心执行引擎，负责所有标准化操作：
 
-**剪报原则（最重要）**：
+| 命令 | 作用 |
+|------|------|
+| `python3 scripts/clip.py scrape <url>` | 抓取内容 + 提取正文 + 质量检查，输出 JSON |
+| `python3 scripts/clip.py exists <url>` | 检查 URL 是否已在剪报库中 |
+| `python3 scripts/clip.py save <url>` | 完整保存流程（检查→抓取→质量检查→写文件） |
+
+> ⚠️ **所有提取逻辑都在 clip.py 里**，SKILL.md 只描述工作流程和判断规则。
+> 遇到提取失败时，修改 clip.py 中的对应平台函数，而不是在 SKILL.md 里临时写脚本。
+
+## 剪报原则（最重要）
+
 - **正文 = 原文照录**，只做清洗，不做理解、不做压缩、不做重组
-- `##` 二级标题 = 原文本身就有的分段标记（HTML `<h2>/<h3>/<h4>` 标签），由抓取代码自动识别转换；**不是 AI 自行概括的小标题**
+- **标题层级由第六步 AI 排版统一处理**：原文的 h2/h3/h4 → `##`/`###`，原文无分节时由 AI 识别主题段落再插入
 - 如果原文没有自然分段，不要强行插入 `##`
 - Summary 是 frontmatter 里的元数据摘要，与正文无关
 
-**质量标准**：
-- 正文必须是原文的忠实副本，清洗掉干扰内容即可
-- HTML 注释、JS 变量、CSS 类名等垃圾内容必须清除
-- 正文在有意义的位置截断，不在句子中间断开
+## 筛选标准
 
-**筛选标准**：就一个字 — **爽**。不只追求有用，不只追求体系，"这个挺有意思"就随手存一下。
+就一个字 — **爽**。不只追求有用，不只追求体系，"这个挺有意思"就随手存一下。
 
-## 入口
+## 工作流程
 
-用户发送链接并要求收藏时，自动触发本 Skill。
-用户要求更新/刷新已有剪报时，自动触发增量更新流程。
+执行时不用逐条报幕，说清楚大致状态即可。例如："抓取中，稍等"而不是"第一步，正在执行抓取命令"。
 
-## 文件命名规范
+### 第一步：接收链接，判断是否已存在
 
-- 格式：`YYYY.MM.DD-标题.md`（**注意是点号分隔年月日，不是横杠**）
-- 日期：记录日期，非原文发布日期；**文件名中的日期自动以点号分隔**，与 frontmatter 的 `YYYY-MM-DD`（横杠）区分
-- 标题：取自原标题的前 **50 字**（避免重要信息被截断），若已存在则追加 `-1`、`-2` 序号
+> **执行约束**：第四步的派蒙分析必须暂存（不输出到对话），直到第九步通知用户时才一并附上。分析不允许拆分成中间步骤提前发出。
 
-## 操作流程
+用 clip.py 检查：
 
-### 第一步：接收并解析链接
-
-接收用户发来的 URL，解析平台类型：
-
-- `github.com` → GitHub 平台
-- `jike.com` / `okjike.com` → 即刻平台
-- `bilibili.com` / `b23.tv` → Bilibili 平台
-- `zhihu.com` → 知乎平台
-- `xiaohongshu.com` → 小红书平台
-- `mp.weixin.qq.com` → 微信公众号平台
-- `feishu.cn` / `larksuite.com` → 飞书文档平台
-- 其他域名 → 通用网页
-
-### 第二步：检查是否已存在
-
-在 `CLIP_DIR` 目录下查找是否有以该 URL 对应的文件。
-
-- **若不存在** → 走全新创建流程（第三步~第九步）
-- **若已存在** → 走增量更新流程（第八步）
-
-### 第三步：抓取页面内容（全新创建）
-
-#### GitHub
-
-- 尝试 GitHub API 获取仓库/文件元信息（创建时间、更新时间、描述）
-- README 内容通过 `https://raw.githubusercontent.com/` 获取
-
-#### 即刻（m.okjike.com）
-
-即客帖是 SPA，所有数据以 JSON 形式嵌在 `<script>` 标签里。步骤：
-1. 用 `urllib.request` 抓取页面（`browser_navigate` 超时严重，不推荐）
-2. 用 `re.findall(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)` 提取所有 script
-3. 遍历找包含 `'props\\\":\\\\u4e3bpageProps\\\\u4e0bpost'` 且 `len(s) > 10000` 的 script
-4. `json.loads(脚本内容)` 后，文章数据在 `data['props']['pageProps']['post']`
-5. 字段映射：
-   - 正文：`post['content']`
-   - 作者：`post['user']['username']` / `post['user']['nickname']` / `post['user']['bio']`（注意不是 `post['author']`）
-   - 时间：`post['createdAt']`
-   - 点赞/评论/转发：`post['likeCount']` / `post['commentCount']` / `post['repostCount']`
-   - 评论列表：`data['props']['pageProps'].get('comments', [])`，每人取 `c['content']` 和 `c['user']['nickname']`
-6. 注意：同一帖子第二次抓可能返回 529（服务器限流），隔几秒再试即可成功
-
-**即刻帖子必须保留评论区**：评论是内容的重要组成部分，必须完整保留到正文中，绝不能截断删掉。具体格式：
-   ```
-   {帖子正文内容}
-
-   ---
-
-   ## 评论区
-   【{用户昵称}】：{评论内容}
-
-   【{用户昵称}】：{评论内容}
-   ```
-   - **评论标题判断逻辑**：
-     - 如果正文里**没有** `## 评论区`，则用 `## 评论区` 作为评论区标题
-     - 如果正文里**已有** `## 评论区`，则用 `## 楼中评论` 作为评论区标题（避免冲突）
-   - 每条评论格式：`【昵称】：内容`，多条按出现顺序排列
-   - 如果有评论回复嵌套，只保留顶层评论（`c['replyToUser']` 为空则保留）
-
-#### 微信公众号（mp.weixin.qq.com）
-
-同样是 SPA，内容嵌在 JS 里。步骤：
-1. 用 `urllib.request` 抓取（User-Agent 设为 iPhone Safari 可绕过部分限制）
-2. 从 HTML 中提取元数据：
-   - 标题：`re.search(r'og:title["\s]*content=["\']([^"\']+)["\']', content, re.I)`
-   - 作者：`re.search(r'var author = "([^"]*)"', content)`
-   - 时间戳：`re.search(r'var ct = "(\d+)"', content)` → `int(ts)` 转 Unix 时间戳
-3. **正文提取必须用 HTMLParser**，不能依赖 regex 标签内文本法（会漏掉 visibility:hidden 的内容）
-4. **微信公众号文章使用 `<h2>`、`<h3>`、`<h4>` 作为小节标题，必须在 HTMLParser 中识别并转换为 Markdown `##` 标题**：
-   ```python
-   class TextExtractor(html.parser.HTMLParser):
-       def __init__(self):
-           super().__init__()
-           self.texts = []
-           self.skip_tags = {'script', 'style', 'noscript', 'iframe', 'embed', 'object'}
-           self.current_skip = 0
-
-       def handle_starttag(self, tag, attrs):
-           if tag in self.skip_tags:
-               self.current_skip += 1
-           elif tag in ('br', 'p', 'section', 'div'):
-               if self.current_skip == 0:
-                   self.texts.append('\n')
-           elif tag in ('h2', 'h3', 'h4'):
-               # 识别微信文章小节标题，转为 ## Markdown 标题
-               if self.current_skip == 0:
-                   self.texts.append('\n\n## ')
-
-       def handle_endtag(self, tag):
-           if tag in self.skip_tags:
-               self.current_skip = max(0, self.current_skip - 1)
-           elif tag in ('p', 'section', 'div'):
-               if self.current_skip == 0:
-                   self.texts.append('\n')
-           elif tag in ('h2', 'h3', 'h4'):
-               if self.current_skip == 0:
-                   self.texts.append('\n')
-
-       def handle_data(self, data):
-           if self.current_skip == 0:
-               text = data.strip()
-               if text:
-                   self.texts.append(text + ' ')
-   ```
-5. **⚠️ 重要：不要用 `re.sub(r'\s+', ' ', text)` 合并所有空格！** 正确做法：
-   - HTMLParser 在 `<p>/<section>/<div>` 时已插入 `\n`，在 `<h2-h4>` 时已插入 `\n\n## `
-   - 全文拼接后只需：`text = re.sub(r' +\n', '\n', text)`（去掉段尾多余空格）
-   - 再用：`text = re.sub(r'\n{3,}', '\n\n', text)`（压缩连续空行）
-   - **禁止全局空格合并**（会把段落边界压掉）
-6. **部分公众号文章内容不在 js_content 内**（如三联生活实验室）。判断方法：先按 js_content 截取，如果提取到的正文少于 2000 字，立即 fallback 到 `id="img-content"` 区域重新提取
-7. **截断范围**：js_content 开始位置到 `js_pc_qr_code` 或 `js_cp_tool` 之前
-8. **正文清洗**：
-   - 清除 HTML 实体：`re.sub(r'&\w+;', '', text)`
-   - 清理开头无用元数据（作者行、编辑行）
-   - **截断**：在文末找到 `预览时标签不可点`、`未经授权`、`值班主编`、`排版` 等标记之一，在其位置截断
-   - 保留文章中已有的自然段落结构
-9. **微信频率限制**：同一 IP 短时间内多次请求会被拦截（空白页面或 403）。失败后等 5~10 秒再重试，连续 3 次失败才放弃
-
-#### 飞书文档（feishu.cn / larksuite.com）
-
-飞书文档是 **SPA**，内容通过 API 渲染。必须使用飞书开放 API 获取内容：
-
-**前置准备**：需要 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`（环境变量或手动提供）。
-
-**Step 1 — 获取 tenant_access_token**：
-```python
-import urllib.request, json
-
-APP_ID = "cli_xxxx"
-APP_SECRET="***"
-
-url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-data = json.dumps({"app_id": APP_ID, "app_secret": APP_SECRET}).encode()
-req = urllib.request.Request(url, data=data)
-req.add_header('Content-Type', 'application/json')
-response = urllib.request.urlopen(req, timeout=15)
-token = json.loads(response.read().decode())['tenant_access_token']
+```bash
+python3 scripts/clip.py exists <url>
 ```
 
-**Step 2 — 从 wiki URL 提取 wiki_token**：
-- URL 格式：`https://my.feishu.cn/wiki/FwwzwIjVBikPqSk8khDc1AmXnle`
-- wiki_token = `FwwzwIjVBikPqSk8khDc1AmXnle`
+- **已存在** → 告知用户，跳过
+- **不存在** → 继续
 
-**Step 3 — 调用 wiki API 获取 obj_token 和 obj_type**：
-```python
-wiki_url = f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=***"
-req = urllib.request.Request(wiki_url)
-req.add_header('Authorization', f'Bearer {token}')
-resp = urllib.request.urlopen(req, timeout=15)
-result = json.loads(resp.read().decode())
-node = result['data']['node']
-obj_token = node['obj_token']   # 用于获取文档内容
-obj_type = node['obj_type']    # 通常是 "docx"
-title = node['title']          # 文档标题
+### 第二步：抓取 + 质量检查
+
+```bash
+python3 scripts/clip.py scrape <url>
 ```
 
-**Step 4 — 调用 docx API 获取文档 blocks**：
-```python
-doc_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{obj_token}"
-req = urllib.request.Request(doc_url)
-req.add_header('Authorization', f'Bearer {token}')
-resp = urllib.request.urlopen(req, timeout=15)
-doc_result = json.loads(resp.read().decode())
-```
+clip.py 会自动：
+1. 识别平台（微信公众号 / 即刻 / GitHub / 飞书 / Bilibili / 通用网页）
+2. 调用对应提取函数获取正文和元数据
+3. 执行质量检查，返回 issues 列表
+4. 输出结构化 JSON
 
-**Step 5 — 获取所有 blocks（正文内容）**：
-```python
-blocks_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{obj_token}/blocks"
-req = urllib.request.Request(blocks_url)
-req.add_header('Authorization', f'Bearer {token}')
-resp = urllib.request.urlopen(req, timeout=15)
-result = json.loads(resp.read().decode())
-items = result['data']['items']
-```
+**质量检查项**（有问题会列在 issues 里）：
 
-**Step 6 — 解析 blocks 提取文本**：
-```python
-TYPE_FIELDS = {
-    1: 'page', 2: 'text', 3: 'heading1', 4: 'heading2', 5: 'heading3',
-    6: 'heading4', 12: 'bullet', 13: 'ordered', 14: 'todo', 15: 'code',
-    16: 'quote', 27: 'divider', 31: 'table', 32: 'table_row',
-    33: 'table_cell', 34: 'quote_container',
-}
+- 正文少于 500 字 → 可能提取失败
+- 标题为空 / 为 "Unknown" → 元数据抓取失败
+- HTML/JS 垃圾残留（`<script>`、class=、style=、window.）→ 清洗不彻底
+- 截断标记后还有超过 100 字内容 → 截断不彻底
+- 正文超过 10 万字 → 可能混入了垃圾
 
-def get_block_text(block):
-    bt = block.get('block_type', 0)
-    field = TYPE_FIELDS.get(bt)
-    if not field or field not in block:
-        return ''
-    content = block[field]
-    if isinstance(content, dict) and 'elements' in content:
-        return ''.join(
-            e['text_run'].get('content', '')
-            for e in content['elements']
-            if 'text_run' in e
-        )
-    return ''
+### 第三步：判断是否继续
 
-type_names = {1:'页面标题', 2:'文本', 3:'H1', 4:'H2', 5:'H3',
-               12:'列表项', 14:'代码块', 16:'引用', 27:'分隔线'}
+读取 JSON 中的 `passed` 字段：
+- `true`（issues 为空）→ 继续第四步
+- `false`（有 issues）→ **不要写文件**，把 issues 报告给用户，询问如何处理
 
-for block in items:
-    text = get_block_text(block)
-    if text:
-        bt = block.get('block_type', 0)
-        type_name = type_names.get(bt, f'T{bt}')
-        print(f"[{type_name}] {text}")
-```
+### 第四步：派蒙分析（暂存，不输出到此步）
 
-**⚠️ 注意事项**：
-- 飞书 wiki 有两种链接格式，都走同一个 wiki API
-- `source_platform` 填写 `feishu`
-- 飞书文档通常结构清晰（多级标题、列表），保留原文层级结构
+分析在后台进行，内容暂存备用，**不写入文件，也不在此步骤告知用户**。此步只产生一段分析文本，延迟到第九步随通知一并发出。
 
-#### Bilibili（bilibili.com / b23.tv）
-
-> ⚠️ 尚未测试，失败时自行尝试其他方案。
-
-**视频**：
-1. 用 `urllib.request` 抓取页面
-2. 标题在 `<title>` 或 `__playinfo__` / `__INITIAL_STATE__` JSON 里
-3. 简介在页面 `<meta name="description">` 或视频信息 JSON 里
-4. 发布时间用 `<meta property="article:published_time">`
-
-**专栏**：
-1. 用 `urllib.request` 抓取页面
-2. 专栏正文在 `<div class="article-content">` 里，用通用 HTMLParser 提取
-3. 标题在 `<h1 class="title">` 里
-
-#### 知乎（zhihu.com）
-
-> ⚠️ 尚未测试，失败时自行尝试其他方案。
-
-**文章/回答**：
-1. 用 `urllib.request` 抓取页面（知乎对爬虫有限流，失败后等几秒再试）
-2. 正文在 `<div class="Post-RichText">` 或 `<div class="RichText">` 里，用通用 HTMLParser 提取
-3. 标题在 `<title>` 或 `<h1 class="Post-Title">` 里
-4. 发布时间用 `<meta property="article:published_time">`
-5. ⚠️ 知乎回答需要登录才能完整获取，未登录时可能只拿到摘要，失败时降级为「仅链接+标题」记录
-
-#### 小红书（xiaohongshu.com）
-
-> ⚠️ 尚未测试，失败时自行尝试其他方案。
-
-**笔记**：
-1. 用 `urllib.request` 抓取页面（PC端可能要求登录，优先尝试）
-2. 正文在 `<div class="note-content">` 或 `window.__INITIAL_SSR_STATE__` JSON 里
-3. 标题在 `<title>` 或 `<h1 class="title">` 里
-4. 图片描述/标签可作为 keywords 的补充来源
-5. ⚠️ 小红书对未登录访问限制较严，失败时降级为「仅链接+标题」记录
-
-#### 通用网页
-
-- 使用 browser 工具或 HTML 解析方式获取页面内容
-- 提取 `<title>` 作为标题
-- 提取 `<meta name="published" / "date" / "article:published_time">` 作为原文发表时间
-- 提取 `<meta name="lastmod" / "article:modified_time">` 或 GitHub 文件的 `commit.date` 作为最近修改时间
-- 提取 `<meta name="keywords">` 作为关键词兜底
-- 提取 `<article>` 或正文主要区域内容
-
-### 第四步：提取正文并排版
-
-**原则：原文照录，不重组、不压缩、不概括。**
-
-**步骤**：
-1. 清洗 HTML 标签，保留纯文本
-2. 去除广告、导航栏、侧边栏、评论区、分享按钮等干扰内容
-3. 保留原文主体内容
-
-**排版规范（仅在原文本身有结构时使用）**：
-- 原文有列表（`1.` `a.` `-` `*`）→ 保留为 Markdown 有序/无序列表
-- 原文有分段（有空行分隔）→ 保留原段落边界
-- 代码块 → 用 ``` 包裹
-- 引用块 → 用 `>` 保留
-
-**必须清除的垃圾内容**：
-- HTML 注释：`re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)`
-- JS 变量：`re.sub(r'window\.\w+\s*=.*?;', '', text)`
-- CSS 类名/选择器：`re.sub(r'\.[a-zA-Z][\w-]*\{[^}]*\}', '', text)`
-- `.weui-*`、`.js_*`、`var ` 开头等残留：`re.sub(r'(var |\.(?:weui|js_)[a-zA-Z0-9_-]*)[^<]*', '', text)`
-
-**截断位置**：在有意义的位置截断（如段尾、小节末尾），绝对不能在句子中间断开。
-
-**⚠️ 禁止行为**：
-- ❌ 不要用 AI 理解后重新概括段落大意
-- ❌ 不要把长文缩写成"核心观点"
-- ❌ 不要把几个段落合并成一个 AI 理解的小节
-- ❌ 不要在原文没有分段的位置强行插入 `##` 二级标题
-
-### 第五步：计算关键词
-
-**步骤**：
-1. 文本分词（按空格和标点分割，保留中文连续词）
-2. 过滤停用词表
-3. 统计词频，选取 TOP 10 高频词
-4. 标题中已出现的词优先保留
-5. 取 3~5 个最有代表性的词作为关键词
-
-**停用词标准表**（内置，无需外部依赖）：
-
-中文常见停用词：`的、了、和、是、在、有、我、你、他、她、它、们、这、那、要、都、被、把、能、会、与、对、向、给、从、到、为、所以、因为、但是、而且、以及、或者、如果、虽然、那么、什么、怎么、多少、哪个、自己、一是、二是、三是、可以、已经、不能、没有`
-
-英文常见停用词：`the、a、an、is、are、was、were、be、been、being、have、has、had、do、does、did、will、would、could、should、may、might、can、to、of、in、for、on、with、at、by、from、as、into、through、during、before、after、and、or、but、if、because、while、that、this、it、its`
-
-### 第六步：填写 frontmatter 元数据
-
-**summary 字段**：一句话说明这篇文章**是什么**，用于快速判断内容。不需要概括全文观点，只需要描述文章类型和主题。参考写法：
-- 例子：文章类型（采访/评测/观点/技术科普）+ 核心主题 + 适读场景
-- 示例：`summary: 虎嗅对DeepSeek V4的技术解读，聚焦工程效率改进与单位智能成本下降，不追逐榜单排名。`
-
-**keywords**：从正文中提取出现频率最高且有实际意义的词，取 3~5 个。标题中已出现的词优先保留。
-
-**tags**：主题标签，如 `[AI, 大模型, 技术解读]`。
-
-### 第六步半：分析（必做，输出给用户，不写入文件）
-
-**原则**：分析是给用户的阅读辅助，**不写入 Markdown 文件**，文件里只有原文。
-
-**口语化要求**：
-- 像派蒙在跟旅行者聊天，不是写报告
-- 控制字数，总长度一般不超过 200 字
-- 语气柔和一点，可以说"感觉"、"好像"、"可能"；少用"绝对"、"必须"、"毫无疑问"
-- 如果拿不准，可以跟旅行者讨论，不强求结论
-
-**分析维度**（每篇都做，不跳过）：
+分析维度（每篇都做）：
 
 1. **核心论点**：一句话说出文章在讲什么
-2. **论证结构**（可选，如果文章层次清晰再写）：
-   - 文章分几层？每层讲什么？
-   - 用原文自己的关键词串起来，不要自己发明
+2. **论证结构**（可选，如果层次清晰再写）
 3. **金句**：原文原话，不改写
-4. **派蒙点评**（口语化，轻量级）：
-   - 这篇大概是什么类型？（比如"个人经验分享"、"技术科普"、"新闻报道"……）
-   - 对旅行者来说，有什么值得注意的地方？
-   - 有什么局限性或者可能值得讨论的点？
+4. **派蒙点评**：什么类型文章、对旅行者的价值、可能的局限
 
-**格式要求**（口语化版）：
-```
-## 文章分析
+> **约束**：分析内容仅输出到对话，不写入 Markdown 文件。正文永远是原文照录。
 
-**标题**：...
+### 第五步：补充 frontmatter（派蒙手动填）
 
-**核心论点**：...
+clip.py 生成的 frontmatter 中有两个字段需要派蒙根据分析结果填充：
 
-**论证结构**（可选）：...
-- ...
-
-**金句**：
-> 「原文原话」
-
-**派蒙点评**：...（控制在 200 字以内，语气自然，像聊天）
+```yaml
+summary: （派蒙补充：一句说明文章类型和主题，不超过150字）
+tags: [（派蒙添加主题标签）]
 ```
 
-**⚠️ 注意**：分析是临时输出给用户看的对话内容，**不追加到 Markdown 正文里**。正文永远是原文照录。
+### 第六步：AI 排版（标题层级化）
 
-### 第七步：写入 Markdown（全新创建）
+在写文件之前，用 LLM 对正文进行标题层级排版。
 
-**文件路径**：`CLIP_DIR/{文件名}.md`
+**标题层级对应规则**：
 
-**文件名格式**：`YYYY.MM.DD-标题.md`（**点号分隔年月日，不是横杠**）
+| 原文层级 | Markdown | 说明 |
+|---------|----------|------|
+| 文章大标题（如微信文章标题） | `#` 一级 | 通常对应 frontmatter 中的 title |
+| 章节标题（如 "从闲聊到助手"） | `##` 二级 | 原文本身就有的节标题 |
+| 子节标题 | `###` 三级 | 原文有的子节 |
+| 更细的子节 | `####` 四级 | 以此类推 |
 
-> ⚠️ **日期格式易错点**：文件名日期用点号（如 `2026.04.26`），frontmatter date 用横杠（如 `2026-04-26`）。两者不同，写代码时不要混用。
+**原文无分节时的处理**：
 
-**Frontmatter 格式**：
+- 即刻帖子、知乎回答等天然没有章节结构的原文，用 AI 识别**自然段落的主题**，在合适位置插入 `##` 二级标题
+- 生成的小标题必须**来自原文关键词或核心概念**，不得凭空创造
+- 如果原文确实很短（500 字以内）、段落主题相近，**可以保持不分节**，不要强行切分
 
-```markdown
----
-title: {原标题}
-type: raw
-maturity: draft
-date: {记录日期，YYYY-MM-DD}
-updated: {最近修改时间，YYYY-MM-DD}
-source_platform: {来源平台}
-original_url: {原文链接}
-recorded_at: {记录时间，YYYY-MM-DD HH:mm:ss}
-summary: {一句话说明文章是什么，用于快速判断内容，不超过150字}
-keywords: [{关键词列表，逗号分隔}]
-tags: [{标签列表}]
----
+**判断示例**：
 
-{正文原文}
+- 微信公众号文章有 h2/h3 → 直接对应 `##` / `###`
+- 即刻帖子无分节 → AI 识别2-4个主题段落，插入 `##` 小标题
+- 1000字以内的短文 → 可保持无二级标题
 
----
+### 第七步：写入文件
 
-## 变更记录
+将 frontmatter（补充了 summary 和 tags）与 AI 排版后的正文合并，一次性写入 Markdown 文件。
 
-- {记录时间} — 初始创建
-```
+**文件命名规则**：
 
-### 第八步：增量更新（文件已存在）
+- 格式：`CLIP_DIR/YYYY.MM.DD-标题.md`（点号分隔年月，不是横杠）
+- **标题优先顺序**：
+  1. 分析阶段生成的短标题（15~25 字），适合大多数场景
+  2. 原标题前 50 字（仅当原标题本身就很短、且没有生成短标题时）
+- 若已存在则追加 `-1`、`-2` 序号
+
+> ⚠️ 日期格式：文件名用点号（`2026.04.26`），frontmatter 用横杠（`2026-04-26`）
+
+### 第八步：排版检查（写文件后复核）
+
+对写好的 Markdown 文件做一次排版层面的质量复核。
+
+**检查内容**：
+
+1. **标题层级是否合理**：文章是否只有 `#` 标题但正文没有任何 `##`，或层级跳跃（如 `#` 直接跳到 `####`）
+2. **段落是否残留干扰内容**：如微信"展开全文"按钮文字、平台引导性语句、无意义的符号串
+3. **HTML/JS 残留**：肉眼可见的 `<xxx>` 标签、class=、style= 等清洗漏网之鱼
+4. **正文是否完整**：对比 scrap JSON 的 raw_text 字符数，大幅偏少可能有内容丢失
+
+**操作方式**：读取已写入的 Markdown 文件，快速扫一遍。发现问题直接 patch 修复，不要返回给用户。
+
+**通过标准**：无明显排版问题、无干扰内容残留、标题层级清晰。细节瑕疵（如个别字词重复）可放过。
+
+### 第九步：通知用户
+
+告知已保存的文件路径，**必须附上第六步半的分析结果**（格式照搬，不省略）。
+
+**全新创建**：告知文件名和路径，必须附上分析结果。
+
+**增量更新**：告知更新的内容摘要（"检测到N处变更，已追加到变更记录"）。
+
+### 第十步：增量更新（文件已存在时触发）
 
 当同一 URL 再次被抓取时，按以下规则处理：
 
@@ -442,52 +179,103 @@ tags: [{标签列表}]
 
 1. **抓取新内容**，与原文对比，找出差异（新增段落、修改、评论更新等）
 2. **读取现有文件**，找到 `## 变更记录` 区域
-3. **在 `## 变更记录` 下方插入本次变更块**：
-   ```markdown
-   ## 变更记录
-   
-   ### {本次变更时间，YYYY-MM-DD HH:mm}
-   
-   #### 新增内容
-   {新增的正文内容，原文照录}
-   
-   #### 内容对比摘要
-   {简要说明这次变更的内容，如"评论区新增5条评论"、"补充了架构图说明"等}
-   ```
+3. **在 `## 变更记录` 下方插入本次变更块**
 4. **更新 frontmatter 中的 `updated` 字段**为当前时间
 5. **绝对不修改、覆盖或删除任何已有的正文内容**
 
-### 第九步：通知用户
+---
 
-**全新创建**：
-- 告知已保存的文件名和路径
-- **必须附上分析结果**（第六步半的输出），格式照搬，不省略
+## 文件命名规范
 
-**增量更新**：告知更新的内容摘要（"检测到N处变更，已追加到变更记录"）
+- 格式：`YYYY.MM.DD-标题.md`（**点号分隔年月，不是横杠**）
+- 日期：记录日期，非原文发布日期
+- 标题：优先用分析阶段生成的短标题（15~25 字）；原标题前 50 字仅作为兜底
+- 若已存在则追加 `-1`、`-2` 序号
 
-**抓取失败**：告知原因，询问是否以"仅链接+标题"形式记录
+## 变更记录规范（clip.py 不处理，手动维护）
+
+当同一 URL 再次被抓取时，**追加不替换**：
+
+1. 读取现有文件，找到 `## 变更记录` 区域
+2. 在其下方插入变更块（格式见下方）
+3. 更新 frontmatter 的 `updated` 字段
+
+```markdown
+## 变更记录
+
+### {本次变更时间，YYYY-MM-DD HH:mm}
+
+#### 新增内容
+{新增的正文内容，原文照录}
+
+#### 内容对比摘要
+{简要说明变更内容}
+```
+
+---
+
+## clip.py 支持的平台
+
+| 平台 | 提取方式 | 备注 |
+|------|---------|------|
+| `mp.weixin.qq.com` | HTMLParser + js_content | 自动识别 h2/h3/h4 标题 |
+| `github.com` | GitHub API + raw README | README 是 HTML 格式，必须过 HTMLParser 清洗 |
+| `jike.com` / `okjike.com` | JSON in script tag | 自动保留评论区 |
+| `feishu.cn` / `larksuite.com` | 飞书开放 API | 需要 FEISHU_APP_ID / FEISHU_APP_SECRET |
+| `bilibili.com` / `b23.tv` | HTMLParser | 支持视频/专栏，标题含B站水印需清洗 |
+| 其他域名 | 通用 HTMLParser | 优先提取 `<article>` / `<main>` |
+
+## 平台提取注意事项（实战教训）
+
+### 微信公众号
+- **author 字段**：`og:article:author`（og 标签）= 公众号名称，`var author`（JS 变量）= 备用。微信公众号没有个人作者字段，author 即公众号名（如"发现明日产品的"）
+- **正文开头 `>` 残留**：微信部分段落含 `style="visibility:hidden"` 隐藏内容，HTMLParser 会把其中的 `>` 分隔符当正文提取。`clean_text()` 里已处理（`re.sub(r"\n>\n", "\n")` 和 `re.sub(r"^>\n", "", text)`），无需在提取逻辑里额外处理
+- **`pub_date`**：微信公众号 `var ct` 时间戳有时为 0，回退到当天日期
+- **登录墙检测**：微信文章若需要登录/关注才能阅读，返回的是小于 50KB 的空壳 HTML（无 `js_content` 正文区域），正常文章返回 3MB+ 完整页面。检测到空壳页面时应判断为"登录墙拦截"，告知用户无法自动抓取
+
+### 即刻
+- **author 字段**：`screenName` = 显示名（如"风小海"），`username` = UUID，`bio` = 个人简介兜底。**不要用 `nickname`**，该字段不存在于数据结构中。检测顺序：`screenName` → `nickname`（不存在）→ `username` → `bio`（兜底）
+- **支持路径**：`m.okjike.com/originalPosts/`（推荐）；评论仅取顶层
+
+### GitHub
+- **README 是 HTML**：GitHub 页面上的 README 是 HTML 格式，不是纯 Markdown。必须过一遍 `通用TextExtractor` 清洗，不能直接用 raw 文本，否则 `<div>`、`<a href>` 等标签会残留在正文中
+- **stars / forks**：clip.py 已从 GitHub API 提取这两个字段，保存时 fronts matter 应补充 `stars` 和 `forks`（已有旧文件缺少这两个字段属正常）
+
+### 飞书（Wiki）
+- **author**：飞书 Wiki API 返回的 `owner` 是 `open_id`（如 `ou_xxx`），没有公开 API 能将其转换为用户姓名（需要 contact API 额外权限）。`author: "飞书文档"` 是当前能取到的最准确值，属平台限制而非 bug
+- **pub_date**：使用 `obj_create_time`（或 `node_create_time`），是 **Wiki 创建时间**，不是派蒙保存时间。注意这是 **Unix 时间戳字符串**（如 `"1776843037"`），需要 `int()` 转换后再 `fromtimestamp()`，且需指定北京时间时区（`datetime.timezone(datetime.timedelta(hours=8))`）转换
+- **所需凭据**：`FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`（已配置在环境变量中，clip.py 自动读取）
 
 ---
 
 ## 目录结构
 
 ```
-CLIP_DIR/                    ← 剪报 raw 层（本 Skill 维护）
-├── README.md               ← 剪报目录说明（如不存在需创建）
-├── YYYY.MM.DD-标题.md       ← 注意：点是分隔符，不是横杠
-└── ...
+CLIP_DIR/
+├── README.md
+├── scripts/
+│   ├── clip.py              ← 核心执行引擎（本 Skill 的程序化部分）
+│   ├── clip_audit.py        ← 剪报库批量审计（检查已存文件质量）
+│   └── clip_summary.py     ← （待实现）批量摘要生成
+└── YYYY.MM.DD-标题.md       ← 注意：点是日期分隔符，不是横杠
 ```
 
 > ⚠️ 若克隆到其他机器使用，请将 `CLIP_DIR` 替换为本地实际路径。
 
-**首次运行须知**：每次在新环境首次执行本 Skill 前，需检查 `CLIP_DIR/README.md` 是否存在。若不存在，请参考以下模板创建目录级 README，告知可访问该目录的用户和 agents 这个文件夹的用途，并注明详细信息请参考本 Skill：
+**首次运行须知**：每次在新环境首次执行本 Skill 前，需检查 `CLIP_DIR/README.md` 是否存在。若不存在，请参考以下模板创建目录级 README：
 
 ```markdown
-# 剪报
+# 信息剪报（Information Clipper）
 
-这是一个本地网页内容收藏库——把散落在各处的感兴趣的内容，以结构化 Markdown 的形式存档在这里。
+把散落在各处的网页内容，像剪报纸条一样存到本地，再也不用依赖某个 App 的收藏夹了。
 
 ## 这是什么
 
-"剪报"的 AI 版本：不用自己动手整理，只需要把觉得有意思的链接扔给 AI，它会咔嚓一下把好东西剪下来，贴成一个完整的文档。
+"剪报"的 AI 版本：不用自己动手整理，只需要把觉得有意思的链接扔给 AI，它会咔嚓一下把好东西剪下来，贴成一个结构完整的 Markdown 文件，存进本地知识库。
+
+筛选标准就一个字 — **爽**。"这个挺有意思"就随手存，不要求每篇都系统有用，更注重趣味性和个人启发。
+
+## Skill 说明
+
+详细信息请参考 `../skills/productivity/information-clipper/SKILL.md`
 ```
