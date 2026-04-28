@@ -11,7 +11,7 @@
 
 设计原则：
 - 所有提取逻辑集中在此脚本，不再散落在 SKILL.md 里
-- 脚本输出结构化 JSON，由派蒙读取后做第六步半分析和最终判断
+- 脚本输出结构化 JSON，由派蒙读取后做分析和最终判断
 - 质量检查在写文件之前执行，有问题时报错，不静默写坏文件
 
 踩坑教训（请勿与脚本内函数/变量同名）：
@@ -48,7 +48,7 @@ HEADERS = {
 }
 
 # 截断标记（微信文章用）
-TRUNCATE_MARKERS = ["未经授权", "预览时标签不可点", "值班主编", "排版"]
+TRUNCATE_MARKERS = ["未经授权", "预览时标签不可点", "值班主编", "阅读原文", "点击阅读全文"]
 
 # 质量检查阈值
 MIN_TEXT_LENGTH = 500       # 正文少于 500 字可能提取失败
@@ -169,13 +169,6 @@ def extract_wechat(url: str) -> dict:
         title_m = re.search(r'<title>([^<]+)</title>', html, re.I)
     title = title_m.group(1).strip() if title_m else "Unknown"
 
-    # author：微信公众号的 "作者" 实为公众号名称，og:article:author 包含公众号名
-    # var author 也是公众号名称，两者等价，取 og: 的更完整
-    author_m = re.search(r'og:article:author["\s]*content=["\']([^"\']+)["\']', html, re.I)
-    if not author_m:
-        author_m = re.search(r'var author\s*=\s*"([^"]*)"', html)
-    author = author_m.group(1).strip() if author_m else "Unknown"
-
     # 发布时间
     ct_m = re.search(r'var ct\s*=\s*"(\d+)"', html)
     ct_str = ct_m.group(1) if ct_m else "0"
@@ -219,11 +212,74 @@ def extract_wechat(url: str) -> dict:
             if len(raw_text2) > len(raw_text):
                 raw_text = raw_text2
 
+    # author（文章作者）：从正文末尾扫描提取
+    body_tail = raw_text[-600:] if len(raw_text) >= 600 else raw_text
+    author = ""
+    author_patterns = [
+        r'文[｜|:]\s*([\u4e00-\u9fff·A-Za-z]{2,15})',          # 文｜杜晨 / 文：杜晨
+        r'本文?[｜|]?\s*播音[：:]\s*([\u4e00-\u9fff]{2,8})',   # 本文播音：魏巍 / 本文｜播音：魏巍 / 文播音：魏巍
+        r'\*作者[：:]\s*([^\n*]{2,20})\*',                     # *作者：xxx*
+        r'作者[：:]\s*([^\n]{2,20})',                          # 作者：xxx
+        r'撰文\s*[|：:]\s*([\u4e00-\u9fff·A-Za-z]{2,15})',    # 撰文 | 杜晨
+        r'[（(]作者[：:]\s*([^\n)）]{2,20})',                  # （作者：xxx）
+        r'作者\s{1,3}([\u4e00-\u9fff·A-Za-z]{2,15})',         # 作者 杜晨（空格分隔）
+    ]
+    for pat in author_patterns:
+        ma = re.search(pat, body_tail)
+        if ma:
+            candidate = ma.group(1).strip().rstrip('。,，')
+            if 2 <= len(candidate) <= 20:
+                author = candidate
+                break
+
+    # official_account（公众号名称）：从正文末尾扫描提取
+    # 近末尾区域（最后400字）用宽泛模式，全文搜索用精确模式
+    search_tail = raw_text[-400:] if len(raw_text) >= 400 else raw_text
+    official_account = ""
+    # 精确模式（全文搜索，不会误匹配正文内容）
+    precise_patterns = [
+        r'本文首发于[《"]([^》"]{2,30})[》"]',                 # 本文首发于《浙江宣传》
+        r'来源[：:]\s*[《"]([^》"]{2,30})[》"]',               # 来源：《晚点》
+        r'原文[链接来源]+[：:]*\s*[《"]([^》"]{2,30})[》"]',   # 原文来源：《xxx》
+        r'首发[于]?[《"]([^》"]{2,30})[》"]',                  # 首发于《xxx》
+        r'来自[《"]([^》"]{2,30})[》"]',                       # 来自：《xxx》
+        r'转载自[《"]([^》"]{2,30})[》"]',                     # 转载自《xxx》
+    ]
+    for pat in precise_patterns:
+        ma = re.search(pat, search_tail)
+        if ma:
+            candidate = ma.group(1).strip().rstrip('。,，')
+            if 2 <= len(candidate) <= 30:
+                official_account = candidate
+                break
+    # 宽泛模式（限末尾区域，防止误匹配正文中的引号内容）
+    # 注意：「」 模式太宽泛，正文中引号内容多，容易误匹配，暂不使用
+    # 如需启用，需同时满足：出现在末尾100字内 AND 长度2-8 AND 邻近"公众号"/"号"等词
+    if not official_account:
+        broad_patterns = []
+        for pat in broad_patterns:
+            ma = re.search(pat, search_tail)
+            if ma:
+                candidate = ma.group(1).strip().rstrip('。,，')
+                if 2 <= len(candidate) <= 20:
+                    official_account = candidate
+                    break
+
+    # 正文末尾追加作者信息提示行
+    if author or official_account:
+        hint_parts = []
+        if author:
+            hint_parts.append(f"作者：{author}")
+        if official_account:
+            hint_parts.append(f"公众号：{official_account}")
+        raw_text = raw_text + "\n\n>/ " + "｜".join(hint_parts)
+
     return {
         "title": title.strip(),
-        "author": author.strip(),
+        "author": author,
+        "official_account": official_account,
         "pub_date": pub_date,
-        "platform": "微信",
+        "platform": "weixin",
         "raw_text": raw_text,
         "truncated_by": used_marker,
     }
@@ -317,7 +373,8 @@ def extract_jike(url: str) -> dict:
 
     user = post_data.get("user", {})
     # screenName 是用户显示名，username 是 UUID，bio 是个人简介兜底
-    author = user.get("screenName") or user.get("nickname") or user.get("username") or user.get("bio") or "Unknown"
+    author = user.get("screenName") or user.get("nickname") or user.get("username") or user.get("bio") or ""
+    author_id = user.get("username", "")  # 用户唯一ID，与 author 并列输出
     content = post_data.get("content", "")
     created_at = post_data.get("createdAt", "")[:10]
 
@@ -343,8 +400,9 @@ def extract_jike(url: str) -> dict:
     return {
         "title": content[:80].replace("\n", " "),
         "author": author,
+        "author_id": author_id,
         "pub_date": created_at,
-        "platform": "即刻",
+        "platform": "jike",
         "raw_text": full_text.strip(),
     }
 
@@ -633,7 +691,9 @@ def build_frontmatter(data: dict, record_date: str, record_time: str, url: str, 
     """生成标准 frontmatter 块（不包含正文）"""
 
     title = data.get("title", "Unknown")
-    author = data.get("author", "Unknown")
+    author = data.get("author", "")
+    official_account = data.get("official_account", "")
+    author_id = data.get("author_id", "")
     pub_date = data.get("pub_date", record_date)
     platform = data.get("platform", "web")
 
@@ -657,6 +717,9 @@ maturity: draft
 date: {record_date}
 updated: {record_date}
 source_platform: {platform}
+author: {author}
+official_account: {official_account}
+author_id: {author_id}
 original_url: {url}
 recorded_at: {record_time}
 summary: （由派蒙根据原文内容补充，描述文章类型和主题，不超过150字）
@@ -809,6 +872,32 @@ def main():
         data = extract(url)
         result = save_clip(data, url, record_date, record_time)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif cmd == "format":
+        # 生成标准 frontmatter + 正文（不写文件），供 AI 排版后写文件用
+        url = sys.argv[2] if len(sys.argv) > 2 else ""
+        if not url:
+            print(json.dumps({"error": "缺少 URL"}))
+            sys.exit(1)
+        now = datetime.datetime.now()
+        record_date = now.strftime("%Y-%m-%d")
+        record_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        data = extract(url)
+        issues = check_text(data)
+        if issues:
+            print(json.dumps({"status": "check_failed", "issues": issues}, ensure_ascii=False))
+            sys.exit(1)
+
+        fm = build_frontmatter(data, record_date, record_time, url, data.get("raw_text", ""))
+        print(json.dumps({
+            "status": "ok",
+            "frontmatter": fm,
+            "raw_text": data.get("raw_text", ""),
+            "title": data.get("title", "Unknown"),
+            "author": data.get("author", ""),
+            "official_account": data.get("official_account", ""),
+        }, ensure_ascii=False))
 
     else:
         print(json.dumps({"error": f"未知命令: {cmd}"}))
